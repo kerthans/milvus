@@ -24,11 +24,13 @@
 #include <string_view>
 #include <utility>
 
+#include "common/RegexQuery.h"
 #include "index/contracts/query/INullReader.h"
 #include "index/contracts/query/IPatternMatchReader.h"
 #include "index/scalar/fmindex/FmIndexArtifact.h"
 #include "index/test_utils/ArtifactTestUtils.h"
 #include "index/test_utils/ScalarTestData.h"
+#include "segcore/SegcoreConfig.h"
 
 namespace milvus::index::test {
 namespace {
@@ -117,6 +119,104 @@ TEST_P(FmIndexV3OwnershipTest, ReaderOwnsPersistedState) {
     EXPECT_GE(reader->MemoryUsage(), 0);
     if (backend.MmapRequested()) {
         EXPECT_GT(reader->CellByteSize().file_bytes, 0);
+    }
+}
+
+TEST_P(FmIndexV3OwnershipTest, LoaderSnapshotsConfiguredCostRatio) {
+    auto& config = segcore::SegcoreConfig::default_config();
+    struct RestoreCostRatio {
+        segcore::SegcoreConfig& config;
+        float value;
+        ~RestoreCostRatio() {
+            config.set_fmindex_cost_ratio(value);
+        }
+    } restore{config, config.get_fmindex_cost_ratio()};
+
+    // The rare literal occurs twice in about 128,000 tokens. With sample rate
+    // 32, its locate cost falls strictly between the two configured bounds.
+    ScalarTestData<std::string_view> data(
+        std::vector<std::string>(1000, std::string(128, 'q')));
+    data.values[0] = "NEEDLE" + std::string(100, 'q') + "SUFFIX";
+    data.values[1] = "SUFFIX" + std::string(100, 'q') + "NEEDLE";
+    data.validity.reset(999);
+    const auto& backend =
+        ScalarReaderBackends().Get<std::string_view>(GetParam());
+    const ScalarTestInput<std::string_view> input(data);
+    auto artifact = backend.Build(input.View());
+    const auto persisted = SerializeV3(*artifact);
+
+    config.set_fmindex_cost_ratio(0.0001f);
+    auto low = OpenV3(backend, persisted, {.row_count = data.values.size()});
+    config.set_fmindex_cost_ratio(0.01f);
+    auto high = OpenV3(backend, persisted, {.row_count = data.values.size()});
+    // Loading snapshots the setting. Existing readers do not refresh it.
+    config.set_fmindex_cost_ratio(0.0001f);
+    const auto* low_pattern =
+        dynamic_cast<const IPatternMatchReader*>(low.get());
+    const auto* high_pattern =
+        dynamic_cast<const IPatternMatchReader*>(high.get());
+    const auto* nulls = dynamic_cast<const INullReader*>(high.get());
+    ASSERT_NE(low_pattern, nullptr);
+    ASSERT_NE(high_pattern, nullptr);
+    ASSERT_NE(nulls, nullptr);
+    const auto validity = nulls->IsNotNull();
+    const LikePatternMatcher like("NEEDLE%SUFFIX");
+    const PartialRegexMatcher regex("^NEEDLE.*SUFFIX$");
+    struct Query {
+        PatternOp op;
+        std::string_view literal;
+    };
+    for (const auto query :
+         {Query{PatternOp::PrefixMatch, "NEEDLE"},
+          Query{PatternOp::PostfixMatch, "SUFFIX"},
+          Query{PatternOp::InnerMatch, "NEEDLE"},
+          Query{PatternOp::Match, "NEEDLE%SUFFIX"},
+          Query{PatternOp::RegexMatch, "^NEEDLE.*SUFFIX$"}}) {
+        SCOPED_TRACE(query.literal);
+        EXPECT_FALSE(low_pattern->ShouldUseForOp(query.op, query.literal));
+        EXPECT_TRUE(high_pattern->ShouldUseForOp(query.op, query.literal));
+        const auto candidates =
+            high_pattern->PatternMatch(query.literal, query.op);
+        ASSERT_EQ(candidates.size(), data.values.size());
+        ASSERT_LT(candidates.count(), data.values.size());
+        ASSERT_EQ(validity.size(), data.values.size());
+        TargetBitmap raw(data.values.size(), false);
+        TargetBitmap indexed(data.values.size(), false);
+        for (size_t row = 0; row < data.values.size(); ++row) {
+            const std::string_view value = data.values[row];
+            bool matches = false;
+            switch (query.op) {
+                case PatternOp::PrefixMatch:
+                    matches = value.starts_with(query.literal);
+                    break;
+                case PatternOp::PostfixMatch:
+                    matches = value.ends_with(query.literal);
+                    break;
+                case PatternOp::InnerMatch:
+                    matches =
+                        value.find(query.literal) != std::string_view::npos;
+                    break;
+                case PatternOp::Match:
+                    matches = like(value);
+                    break;
+                case PatternOp::RegexMatch:
+                    matches = regex(value);
+                    break;
+            }
+            EXPECT_EQ(validity[row], data.validity[row]) << row;
+            EXPECT_FALSE(candidates[row] && !data.validity[row]) << row;
+            if (data.validity[row] && matches) {
+                raw.set(row);
+            }
+            if (candidates[row] && validity[row] && matches) {
+                indexed.set(row);
+            }
+        }
+        EXPECT_TRUE(indexed == raw);
+        EXPECT_GT(raw.count(), 0);
+        if (high_pattern->PatternMatchIsExact(query.op)) {
+            EXPECT_TRUE(candidates == raw);
+        }
     }
 }
 
