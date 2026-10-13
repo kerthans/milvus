@@ -631,5 +631,53 @@ TEST(HybridIndexBuilderTest, UnrecognizableSelectorlessArtifactIsRejected) {
     });
 }
 
+TEST(HybridIndexBuilderTest, LeadingPlusCardinalityLimitMatchesUnsignedText) {
+    const auto& backend = ScalarReaderBackends().Get<int64_t>("HybridInt64");
+    for (const size_t distinct : {size_t{99}, size_t{100}}) {
+        auto data = IntegerCardinalityData(distinct, false);
+        const ScalarTestInput<int64_t> input(data);
+        const auto expected_selector =
+            distinct == 99 ? ScalarIndexType::BITMAP : ScalarIndexType::STLSORT;
+        for (const auto limit : {"100", "+100"}) {
+            SCOPED_TRACE(limit);
+            auto params = backend.BuildParams();
+            params[BITMAP_INDEX_CARDINALITY_LIMIT] = limit;
+            auto builder =
+                BuilderRegistry<ScalarBuildInput<int64_t>>::Instance().Create(
+                    families::kHybrid, params);
+            ASSERT_NE(builder, nullptr);
+            auto artifact = std::move(*builder).Build(input.View());
+            const auto persisted = SerializeV3(*artifact);
+            EXPECT_EQ(persisted.metadata.at(INDEX_TYPE).get<uint8_t>(),
+                      static_cast<uint8_t>(expected_selector));
+            auto reader = OpenV3(backend, persisted, {.row_count = distinct});
+            const auto* predicate =
+                dynamic_cast<const IScalarPredicateReader<int64_t>*>(
+                    reader.get());
+            ASSERT_NE(predicate, nullptr);
+            const int64_t key = 50;
+            const auto hits = predicate->In(1, &key);
+            ASSERT_EQ(hits.size(), distinct);
+            for (size_t row = 0; row < distinct; ++row) {
+                EXPECT_EQ(hits[row], data.values[row] == key) << row;
+            }
+        }
+    }
+}
+
+TEST(HybridIndexBuilderTest, LeadingPlusDoesNotAcceptMalformedIntegers) {
+    const auto& backend = ScalarReaderBackends().Get<int64_t>("HybridInt64");
+    for (const auto limit : {"+", "++1", "+-1", " 100", "1x"}) {
+        SCOPED_TRACE(limit);
+        auto params = backend.BuildParams();
+        params[BITMAP_INDEX_CARDINALITY_LIMIT] = limit;
+        ExpectSegcoreError(ErrorCode::DataTypeInvalid, [&] {
+            static_cast<void>(
+                BuilderRegistry<ScalarBuildInput<int64_t>>::Instance().Create(
+                    families::kHybrid, params));
+        });
+    }
+}
+
 }  // namespace
 }  // namespace milvus::index::test

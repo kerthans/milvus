@@ -54,7 +54,8 @@ TestArtifactData
 BuildProjectedHybrid(const std::vector<std::string>& raw,
                      DataType value_type,
                      std::string_view cast,
-                     std::string_view path) {
+                     std::string_view path,
+                     Config cardinality_limit = 16) {
     Config params = {
         {"field_type", static_cast<int>(DataType::JSON)},
         {"value_type", static_cast<int>(value_type)},
@@ -64,7 +65,7 @@ BuildProjectedHybrid(const std::vector<std::string>& raw,
         {JSON_CAST_TYPE, std::string(cast)},
         {JSON_PATH, std::string(path)},
         {FIELD_ID, 101},
-        {BITMAP_INDEX_CARDINALITY_LIMIT, 16},
+        {BITMAP_INDEX_CARDINALITY_LIMIT, std::move(cardinality_limit)},
         {SCALAR_INDEX_ENGINE_VERSION, 3},
         {HYBRID_LOW_CARDINALITY_INDEX_TYPE, BITMAP_INDEX_TYPE},
         {HYBRID_HIGH_CARDINALITY_INDEX_TYPE,
@@ -184,6 +185,57 @@ TEST(JsonProjectedHybridIndexBuilderTest,
     EXPECT_EQ(hits.count(), 4);
     for (size_t i = 10; i < raw.size(); ++i) {
         EXPECT_FALSE(hits[i]);
+    }
+}
+
+TEST(JsonProjectedHybridIndexBuilderTest,
+     LeadingPlusCardinalityLimitMatchesUnsignedText) {
+    const auto& backend =
+        ScalarReaderBackends().Get<double>("JsonProjectedHybridDouble");
+    for (const size_t distinct : {size_t{99}, size_t{100}}) {
+        std::vector<std::string> raw;
+        for (size_t row = 0; row < distinct; ++row) {
+            raw.push_back("{\"n\":" + std::to_string(row) + "}");
+        }
+        const auto expected_selector =
+            distinct == 99 ? ScalarIndexType::BITMAP : ScalarIndexType::STLSORT;
+        for (const auto limit : {"100", "+100"}) {
+            SCOPED_TRACE(limit);
+            const auto persisted = BuildProjectedHybrid(
+                raw, DataType::DOUBLE, "DOUBLE", "/n", limit);
+            ASSERT_NO_FATAL_FAILURE(
+                ExpectSelector(persisted, expected_selector));
+            auto reader =
+                OpenV3(backend,
+                       persisted,
+                       {.row_count = distinct, .values = {{JSON_PATH, "/n"}}});
+            const auto* json =
+                dynamic_cast<const IJsonIndexReader*>(reader.get());
+            ASSERT_NE(json, nullptr);
+            auto resolved =
+                json->Resolve("/n", JsonCastType::FromString("DOUBLE"));
+            ASSERT_TRUE(resolved);
+            const auto* predicate =
+                dynamic_cast<const IScalarPredicateReader<double>*>(
+                    resolved.get());
+            ASSERT_NE(predicate, nullptr);
+            const auto hits = predicate->Range(50.0, CompareOp::GreaterEqual);
+            ASSERT_EQ(hits.size(), distinct);
+            for (size_t row = 0; row < distinct; ++row) {
+                EXPECT_EQ(hits[row], row >= 50) << row;
+            }
+        }
+    }
+}
+
+TEST(JsonProjectedHybridIndexBuilderTest,
+     LeadingPlusDoesNotAcceptMalformedIntegers) {
+    for (const auto limit : {"+", "++1", "+-1", " 100", "1x"}) {
+        SCOPED_TRACE(limit);
+        ExpectSegcoreError(ErrorCode::DataTypeInvalid, [&] {
+            static_cast<void>(BuildProjectedHybrid(
+                {R"({"n":1})"}, DataType::DOUBLE, "DOUBLE", "/n", limit));
+        });
     }
 }
 
