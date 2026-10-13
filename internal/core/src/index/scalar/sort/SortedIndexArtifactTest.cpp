@@ -18,7 +18,6 @@
 
 #include <cstdint>
 #include <cstring>
-#include <limits>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -211,7 +210,7 @@ TEST(SortedIndexArtifactTest, IncompleteNumericAuxiliaryStateIsRejected) {
                        [&] { static_cast<void>(OpenV3(backend, persisted)); });
 }
 
-TEST(SortedIndexArtifactTest, InvalidNumericReverseOffsetIsRejected) {
+TEST(SortedIndexArtifactTest, NumericReverseOffsetSizeIsChecked) {
     const auto& backend =
         ScalarReaderBackends().Get<int64_t>("SortedInt64NonNull");
     ScalarTestData<int64_t> data({1, 2, 3});
@@ -220,9 +219,8 @@ TEST(SortedIndexArtifactTest, InvalidNumericReverseOffsetIsRejected) {
     auto persisted = SerializeV3(*artifact);
     auto& offsets =
         persisted.entries.at(std::string(sort_format::kIdxToOffsets));
-    ASSERT_GE(offsets.size(), sizeof(int32_t));
-    const auto invalid = std::numeric_limits<int32_t>::max();
-    std::memcpy(offsets.data(), &invalid, sizeof(invalid));
+    ASSERT_FALSE(offsets.empty());
+    offsets.pop_back();
 
     ExpectSegcoreError(ErrorCode::DataFormatBroken,
                        [&] { static_cast<void>(OpenV3(backend, persisted)); });
@@ -242,7 +240,7 @@ TEST(SortedIndexArtifactTest, UnsupportedStringVersionIsRejectedExactly) {
                        [&] { static_cast<void>(OpenV3(backend, persisted)); });
 }
 
-TEST(SortedIndexArtifactTest, InvalidStringReverseOffsetIsRejected) {
+TEST(SortedIndexArtifactTest, StringReverseOffsetSizeIsChecked) {
     const auto& backend =
         ScalarReaderBackends().Get<std::string_view>("SortedVarcharNonNull");
     ScalarTestData<std::string_view> data({"a", "b", "c"});
@@ -251,21 +249,21 @@ TEST(SortedIndexArtifactTest, InvalidStringReverseOffsetIsRejected) {
     auto persisted = SerializeV3(*artifact);
     auto& offsets =
         persisted.entries.at(std::string(sort_format::kIdxToOffsets));
-    ASSERT_GE(offsets.size(), sizeof(int32_t));
-    const auto invalid = std::numeric_limits<int32_t>::max();
-    std::memcpy(offsets.data(), &invalid, sizeof(invalid));
+    ASSERT_FALSE(offsets.empty());
+    offsets.pop_back();
 
     ExpectSegcoreError(ErrorCode::DataFormatBroken,
                        [&] { static_cast<void>(OpenV3(backend, persisted)); });
 }
 
-TEST(SortedIndexArtifactTest, StringPostingRowBeyondCountIsRejected) {
+TEST(SortedIndexArtifactTest, StringOffsetRebuildRejectsPostingRowBeyondCount) {
     const auto& backend =
         ScalarReaderBackends().Get<std::string_view>("SortedVarcharNonNull");
     ScalarTestData<std::string_view> data({"a", "b", "c"});
     data.validity_present = false;
     auto artifact = BuildSorted(backend, std::move(data));
     auto persisted = SerializeV3(*artifact);
+    persisted.entries.erase(std::string(sort_format::kIdxToOffsets));
     auto& payload = persisted.entries.at(std::string(sort_format::kIndexData));
     auto read_u32 = [&](size_t offset) {
         EXPECT_LE(offset + sizeof(uint32_t), payload.size());

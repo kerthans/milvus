@@ -137,6 +137,7 @@ set(INDEX_TEST_FILES
         ${CMAKE_HOME_DIRECTORY}/src/index/scalar/sort/SortedStringPostingTest.cpp
         ${CMAKE_HOME_DIRECTORY}/src/index/scalar/marisa/MarisaIndexLoadErrorTest.cpp
         ${CMAKE_HOME_DIRECTORY}/src/index/scalar/marisa/MarisaIndexStagingTest.cpp
+        ${CMAKE_HOME_DIRECTORY}/src/index/scalar/sort/SortedPersistedAuxTest.cpp
         )
 set(INDEX_TEST_SUPPORT_FILES
         ${CMAKE_HOME_DIRECTORY}/src/index/test_utils/JsonDataSets.cpp
