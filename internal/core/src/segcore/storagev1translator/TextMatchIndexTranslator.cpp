@@ -83,7 +83,8 @@ EstimateValidityBitmapBytes(int64_t num_rows) {
 TextMatchIndexTranslator::TextMatchIndexTranslator(
     TextMatchIndexLoadInfo load_info,
     milvus::storage::FileManagerContext file_manager_context,
-    milvus::Config config)
+    milvus::Config config,
+    milvus::OpContext* op_ctx)
     : load_info_(std::move(load_info)),
       file_manager_context_(std::move(file_manager_context)),
       config_(std::move(config)),
@@ -100,6 +101,12 @@ TextMatchIndexTranslator::TextMatchIndexTranslator(
             /* support_eviction */ true,
             std::nullopt,
             milvus::segcore::MetricAttributionFromShard(load_info_.shard)) {
+    CheckCancellation(
+        op_ctx, load_info_.segment_id, "TextMatchIndexTranslator metadata");
+    IndexLoadContext load_ctx(
+        op_ctx,
+        index::GetValueFromConfig<int32_t>(config_, "load_priority")
+            .value_or(0));
     milvus::index::IndexFamily family = milvus::index::families::kText;
     const auto value_type = static_cast<DataType>(
         file_manager_context_.fieldDataMeta.field_schema.data_type());
@@ -134,10 +141,13 @@ TextMatchIndexTranslator::TextMatchIndexTranslator(
             load_info_.num_rows,
             *files,
             file_manager_context_,
-            storage::ArtifactStorageNamespace::TextLog);
+            storage::ArtifactStorageNamespace::TextLog,
+            &load_ctx.ctx);
         packed_load_resource_request_ = resources.request;
         meta_.loading_overhead_config = std::move(resources.overhead);
     }
+    CheckCancellation(
+        op_ctx, load_info_.segment_id, "TextMatchIndexTranslator metadata");
 }
 
 size_t

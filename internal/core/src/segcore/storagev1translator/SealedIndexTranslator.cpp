@@ -99,7 +99,8 @@ SealedIndexTranslator::SealedIndexTranslator(
     const milvus::segcore::LoadIndexInfo* load_index_info,
     milvus::tracer::TraceContext ctx,
     milvus::storage::FileManagerContext file_manager_context,
-    Config config)
+    Config config,
+    milvus::OpContext* op_ctx)
     : index_type_(ReadIndexType(config)),
       ctx_(ctx),
       file_manager_context_(std::move(file_manager_context)),
@@ -148,6 +149,15 @@ SealedIndexTranslator::SealedIndexTranslator(
           !lazy_load_,
           std::nullopt,
           milvus::segcore::MetricAttributionFromShard(load_index_info->shard)) {
+    CheckCancellation(
+        op_ctx, load_index_info->segment_id, "LoadIndex metadata");
+    IndexLoadContext load_ctx(
+        op_ctx,
+        index::GetValueFromConfig<int32_t>(config_, "load_priority")
+            .value_or(0));
+    const auto priority = load_ctx.ctx.runtime_load_priority.value_or(0) != 0
+                              ? proto::common::LoadPriority::LOW
+                              : proto::common::LoadPriority::HIGH;
     file_manager_context_.use_async_load =
         file_manager_context_.use_async_load.value_or(
             segcore::storagev2translator::StorageV2AsyncLoadEnabled());
@@ -181,11 +191,17 @@ SealedIndexTranslator::SealedIndexTranslator(
     storage::LoadOptions metadata_options;
     metadata_options.params = config_;
     metadata_options.estimated_bytes = index_load_info_.index_size;
+    // Borrowed only by the blocking inspections in this constructor. Sources
+    // retain the priority and cancellation token, never the caller's pointer.
+    metadata_options.op_ctx = &load_ctx.ctx;
     auto resolved_family = adapted.family;
     std::unique_ptr<storage::AsyncIndexEntryReader> packed_source;
     if (packed_v3) {
         packed_source = index::InspectPackedIndexFile(
-            index_load_info_.index_files, file_manager_context_);
+            index_load_info_.index_files,
+            file_manager_context_,
+            storage::ArtifactStorageNamespace::Index,
+            &load_ctx.ctx);
         resolved_family = index::ResolvePackedLoadFamily(
             adapted.family, packed_source->IndexMeta(), config_);
         if (adapted.family != index::families::kJsonFlat) {
@@ -199,22 +215,27 @@ SealedIndexTranslator::SealedIndexTranslator(
                                        file_manager_context_,
                                        index_load_info_.index_files,
                                        metadata_options);
+        CheckCancellation(
+            op_ctx, load_index_info->segment_id, "LoadIndex metadata");
         if (*file_manager_context_.use_async_load) {
             resolved_family =
                 folly::coro::blockingWait(folly::coro::co_withExecutor(
-                    storage::ResolveAsyncLoadExecutor(
-                        {}, proto::common::LoadPriority::HIGH),
+                    storage::ResolveAsyncLoadExecutor({}, priority),
                     index::ResolveLoadFamilyAsync(
                         adapted.family, *source, config_)));
         } else {
             resolved_family =
                 index::ResolveLoadFamily(adapted.family, *source, config_);
         }
+        CheckCancellation(
+            op_ctx, load_index_info->segment_id, "LoadIndex metadata");
         if (adapted.family != index::families::kJsonFlat) {
             config_ = index::AnnotateJsonProjectionCompleteness(
                 std::move(config_), *source);
         }
     }
+    CheckCancellation(
+        op_ctx, load_index_info->segment_id, "LoadIndex metadata");
     const auto loader_entry =
         index::LoaderRegistry::Instance().Lookup(resolved_family);
     AssertInfo(static_cast<bool>(loader_entry),
@@ -243,7 +264,9 @@ SealedIndexTranslator::SealedIndexTranslator(
                                    index_load_info_.enable_mmap,
                                    index_load_info_.num_rows,
                                    index_load_info_.index_files,
-                                   file_manager_context_);
+                                   file_manager_context_,
+                                   storage::ArtifactStorageNamespace::Index,
+                                   &load_ctx.ctx);
         load_resource_request_ = resources.request;
         meta_.loading_overhead_config = std::move(resources.overhead);
     } else {
@@ -271,6 +294,8 @@ SealedIndexTranslator::SealedIndexTranslator(
     if (index_load_info_.load_resource_request.has_value()) {
         load_resource_request_ = *index_load_info_.load_resource_request;
     }
+    CheckCancellation(
+        op_ctx, load_index_info->segment_id, "LoadIndex metadata");
 }
 
 size_t

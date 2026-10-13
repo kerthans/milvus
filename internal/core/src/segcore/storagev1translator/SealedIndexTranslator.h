@@ -34,11 +34,14 @@ namespace milvus::segcore::storagev1translator {
 
 class SealedIndexTranslator : public IndexReaderTranslator {
  public:
+    // The operation context is borrowed during construction only; runtime load
+    // priority overrides config, and an absent override falls back to config.
     SealedIndexTranslator(
         const milvus::segcore::LoadIndexInfo* load_index_info,
         milvus::tracer::TraceContext ctx,
         milvus::storage::FileManagerContext file_manager_context,
-        Config config);
+        Config config,
+        milvus::OpContext* op_ctx = nullptr);
     ~SealedIndexTranslator() override = default;
     size_t
     num_cells() const override;

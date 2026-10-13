@@ -71,6 +71,7 @@ RunPackedIndexLoad(PackedIndexSource& source,
  * @brief Inspect one packed file's directory and metadata without loading
  * payloads.
  * @note Blocking family-selection boundary; transport follows the pinned mode.
+ * @param op_ctx Borrowed through this blocking call; may be null.
  * @return An owned metadata reader, including when stream opening is
  * synchronous.
  */
@@ -78,6 +79,7 @@ std::unique_ptr<storage::AsyncIndexEntryReader>
 InspectPackedIndexFile(const std::vector<std::string>& files,
                        const storage::FileManagerContext& context,
                        storage::ArtifactStorageNamespace storage_namespace =
-                           storage::ArtifactStorageNamespace::Index);
+                           storage::ArtifactStorageNamespace::Index,
+                       milvus::OpContext* op_ctx = nullptr);
 
 }  // namespace milvus::index

@@ -74,7 +74,8 @@ ScalarIndexFileLoadResource(
     const std::vector<std::string>& index_files,
     const storage::FileManagerContext& context,
     storage::ArtifactStorageNamespace storage_namespace =
-        storage::ArtifactStorageNamespace::Index);
+        storage::ArtifactStorageNamespace::Index,
+    milvus::OpContext* op_ctx = nullptr);
 
 /**
  * @brief Estimate packed scalar loading resources from inspected metadata.

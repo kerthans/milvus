@@ -40,10 +40,12 @@ struct TextMatchIndexLoadInfo {
 // the cache layer with a stable key and resource usage.
 class TextMatchIndexTranslator : public IndexReaderTranslator {
  public:
+    // Borrow the operation context only for constructor metadata inspection.
     TextMatchIndexTranslator(
         TextMatchIndexLoadInfo load_info,
         milvus::storage::FileManagerContext file_manager_context,
-        milvus::Config config);
+        milvus::Config config,
+        milvus::OpContext* op_ctx = nullptr);
 
     ~TextMatchIndexTranslator() override = default;
 

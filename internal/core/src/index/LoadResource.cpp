@@ -26,6 +26,7 @@
 
 #include "common/Consts.h"
 #include "common/EasyAssert.h"
+#include "common/OpContext.h"
 #include "common/Utils.h"
 #include "index/Families.h"
 #include "index/Meta.h"
@@ -251,7 +252,15 @@ HybridInternalIndexTypeToIndexType(ScalarIndexType type) {
 // preserves the historical fallback to the generic HYBRID estimate.
 IndexType
 ResolveLegacyHybridIndexType(const std::vector<std::string>& index_files,
-                             const storage::FileManagerContext& context) {
+                             const storage::FileManagerContext& context,
+                             milvus::OpContext* op_ctx) {
+    const auto token =
+        op_ctx ? op_ctx->cancellation_token : folly::CancellationToken{};
+    const auto priority =
+        op_ctx && op_ctx->runtime_load_priority.value_or(0) != 0
+            ? proto::common::LoadPriority::LOW
+            : proto::common::LoadPriority::HIGH;
+    storage::ThrowIfCancelled(token, "inspect legacy hybrid metadata");
     if (!context.Valid()) {
         return {};
     }
@@ -265,8 +274,8 @@ ResolveLegacyHybridIndexType(const std::vector<std::string>& index_files,
     }
     try {
         storage::MemFileManagerImpl manager(context);
-        auto data = manager.LoadIndexToMemory(
-            {*file}, proto::common::LoadPriority::HIGH);
+        auto data = manager.LoadIndexToMemory({*file}, priority);
+        storage::ThrowIfCancelled(token, "inspect legacy hybrid metadata");
         BinarySet binary_set;
         AssembleIndexDatas(data, binary_set);
         const auto type = binary_set.GetByName(INDEX_TYPE);
@@ -281,6 +290,13 @@ ResolveLegacyHybridIndexType(const std::vector<std::string>& index_files,
         return HybridInternalIndexTypeToIndexType(
             static_cast<ScalarIndexType>(type->data[0]));
     } catch (const std::exception& e) {
+        // Preserve the historical estimate fallback for ordinary read errors,
+        // while cancellation must reach the caller as FollyCancel.
+        if (const auto* error = dynamic_cast<const SegcoreError*>(&e);
+            error && error->get_error_code() == ErrorCode::FollyCancel) {
+            throw;
+        }
+        storage::ThrowIfCancelled(token, "inspect legacy hybrid metadata");
         LOG_WARN(
             "failed to resolve legacy hybrid internal index type from {}, "
             "fallback to hybrid estimate: {}",
@@ -550,7 +566,15 @@ LegacyScalarLoadResource(DataType field_type,
                          bool mmap_enable,
                          int64_t num_rows,
                          const std::vector<std::string>& paths,
-                         const storage::FileManagerContext& context) {
+                         const storage::FileManagerContext& context,
+                         milvus::OpContext* op_ctx) {
+    const auto token =
+        op_ctx ? op_ctx->cancellation_token : folly::CancellationToken{};
+    const auto priority =
+        op_ctx && op_ctx->runtime_load_priority.value_or(0) != 0
+            ? proto::common::LoadPriority::LOW
+            : proto::common::LoadPriority::HIGH;
+    storage::ThrowIfCancelled(token, "inspect legacy scalar metadata");
     auto estimate = [&]() -> folly::coro::Task<LoadResourceRequest> {
         auto params = index_params;
         auto type = params.at(INDEX_TYPE);
@@ -559,6 +583,7 @@ LegacyScalarLoadResource(DataType field_type,
             type == NGRAM_INDEX_TYPE || type == RTREE_INDEX_TYPE;
         storage::LoadOptions options;
         options.params = ParseConfigFromIndexParams(params);
+        options.op_ctx = op_ctx;
         auto source = co_await storage::V1RemoteSource::OpenAsync(
             context,
             paths,
@@ -566,9 +591,11 @@ LegacyScalarLoadResource(DataType field_type,
             storage::ArtifactStorageNamespace::Index,
             directory_layout ? storage::V1SourceLayout::DiskFiles
                              : storage::V1SourceLayout::MemoryEntries);
+        storage::ThrowIfCancelled(token, "inspect legacy scalar metadata");
         if (type == HYBRID_INDEX_TYPE) {
             const auto family = co_await ResolveLoadFamilyAsync(
                 families::kHybrid, *source, options.params);
+            storage::ThrowIfCancelled(token, "inspect legacy scalar metadata");
             for (const auto child : {ScalarIndexType::BITMAP,
                                      ScalarIndexType::STLSORT,
                                      ScalarIndexType::MARISA,
@@ -582,6 +609,7 @@ LegacyScalarLoadResource(DataType field_type,
         }
         const auto names = source->EntryNames();
         const auto bytes = co_await source->InspectLoadBytesAsync(names);
+        storage::ThrowIfCancelled(token, "inspect legacy scalar metadata");
         const auto persisted = std::max(index_size, bytes.payload);
         auto rows = num_rows;
         if (field_type == DataType::ARRAY) {
@@ -594,6 +622,7 @@ LegacyScalarLoadResource(DataType field_type,
         if (type == BITMAP_INDEX_TYPE) {
             const auto encoded =
                 co_await source->ReadEntryAsync(BITMAP_INDEX_META);
+            storage::ThrowIfCancelled(token, "inspect legacy scalar metadata");
             try {
                 const auto meta =
                     YAML::Load(std::string(encoded.begin(), encoded.end()));
@@ -650,6 +679,7 @@ LegacyScalarLoadResource(DataType field_type,
         }
         const auto sidecar_bytes =
             co_await source->InspectLoadBytesAsync(sidecars);
+        storage::ThrowIfCancelled(token, "inspect legacy scalar metadata");
         if (field_type == DataType::JSON) {
             request.final_memory_cost =
                 SaturatingAdd(request.final_memory_cost,
@@ -679,11 +709,12 @@ LegacyScalarLoadResource(DataType field_type,
         }
         co_return request;
     };
-    return folly::coro::blockingWait(folly::coro::co_withExecutor(
+    auto request = folly::coro::blockingWait(folly::coro::co_withExecutor(
         storage::ResolveAsyncLoadExecutor(
-            storage::LocalFileIOPool::GetInstance().GetExecutor(),
-            proto::common::LoadPriority::HIGH),
+            storage::LocalFileIOPool::GetInstance().GetExecutor(), priority),
         estimate()));
+    storage::ThrowIfCancelled(token, "inspect legacy scalar metadata");
+    return request;
 }
 }  // namespace
 
@@ -693,6 +724,13 @@ LegacyVectorFileLoadResource(LoadResourceRequest request,
                              const storage::LoadOptions& options,
                              const std::vector<std::string>& paths,
                              const storage::FileManagerContext& context) {
+    const auto token = options.op_ctx ? options.op_ctx->cancellation_token
+                                      : folly::CancellationToken{};
+    const auto priority =
+        options.op_ctx && options.op_ctx->runtime_load_priority.value_or(0) != 0
+            ? proto::common::LoadPriority::LOW
+            : proto::common::LoadPriority::HIGH;
+    storage::ThrowIfCancelled(token, "inspect legacy vector metadata");
     auto estimate = [&]() -> folly::coro::Task<LoadResourceRequest> {
         auto source = co_await storage::V1RemoteSource::OpenAsync(
             context,
@@ -701,10 +739,12 @@ LegacyVectorFileLoadResource(LoadResourceRequest request,
             storage::ArtifactStorageNamespace::Index,
             disk_family ? storage::V1SourceLayout::DiskFiles
                         : storage::V1SourceLayout::MemoryEntries);
+        storage::ThrowIfCancelled(token, "inspect legacy vector metadata");
         const auto names =
             disk_family ? VectorDiskLoader::AsyncEntryNames(*source, options)
                         : source->EntryNames();
         const auto bytes = co_await source->InspectLoadBytesAsync(names);
+        storage::ThrowIfCancelled(token, "inspect legacy vector metadata");
         // BinarySet payloads coexist with native Deserialize state. For native
         // stream backends, names contains only eagerly prepared sidecars.
         const bool memory_mmap =
@@ -723,11 +763,12 @@ LegacyVectorFileLoadResource(LoadResourceRequest request,
             scratch);
         co_return request;
     };
-    return folly::coro::blockingWait(folly::coro::co_withExecutor(
+    request = folly::coro::blockingWait(folly::coro::co_withExecutor(
         storage::ResolveAsyncLoadExecutor(
-            storage::LocalFileIOPool::GetInstance().GetExecutor(),
-            proto::common::LoadPriority::HIGH),
+            storage::LocalFileIOPool::GetInstance().GetExecutor(), priority),
         estimate()));
+    storage::ThrowIfCancelled(token, "inspect legacy vector metadata");
+    return request;
 }
 
 ScalarIndexLoadResources
@@ -739,7 +780,11 @@ ScalarIndexFileLoadResource(
     int64_t num_rows,
     const std::vector<std::string>& index_files,
     const storage::FileManagerContext& context,
-    storage::ArtifactStorageNamespace storage_namespace) {
+    storage::ArtifactStorageNamespace storage_namespace,
+    milvus::OpContext* op_ctx) {
+    const auto token =
+        op_ctx ? op_ctx->cancellation_token : folly::CancellationToken{};
+    storage::ThrowIfCancelled(token, "inspect scalar metadata");
     const auto version =
         GetValueFromConfig<int32_t>(ParseConfigFromIndexParams(index_params),
                                     SCALAR_INDEX_ENGINE_VERSION)
@@ -754,12 +799,14 @@ ScalarIndexFileLoadResource(
                                              mmap_enable,
                                              num_rows,
                                              index_files,
-                                             context),
+                                             context,
+                                             op_ctx),
                     std::nullopt};
         }
         auto resolved_params = index_params;
         if (resolved_params.at(INDEX_TYPE) == HYBRID_INDEX_TYPE) {
-            auto type = ResolveLegacyHybridIndexType(index_files, context);
+            auto type =
+                ResolveLegacyHybridIndexType(index_files, context, op_ctx);
             if (!type.empty()) {
                 resolved_params[INDEX_TYPE] = std::move(type);
             }
@@ -773,7 +820,7 @@ ScalarIndexFileLoadResource(
                 std::nullopt};
     }
     auto reader =
-        InspectPackedIndexFile(index_files, context, storage_namespace);
+        InspectPackedIndexFile(index_files, context, storage_namespace, op_ctx);
     return PackedScalarIndexLoadResource(field_type,
                                          index_size,
                                          index_params,

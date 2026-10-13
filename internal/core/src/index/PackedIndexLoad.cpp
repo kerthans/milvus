@@ -22,6 +22,7 @@
 #include <optional>
 
 #include "folly/coro/WithCancellation.h"
+#include "folly/Try.h"
 #include "storage/EntryStreamUtils.h"
 #include "storage/LocalFileIOPool.h"
 
@@ -52,26 +53,33 @@ folly::coro::Task<std::unique_ptr<storage::AsyncIndexEntryReader>>
 InspectPackedScalarIndex(const std::vector<std::string>& files,
                          const storage::FileManagerContext& context,
                          storage::ArtifactStorageNamespace storage_namespace,
-                         bool use_async_load) {
+                         bool use_async_load,
+                         proto::common::LoadPriority priority,
+                         folly::CancellationToken token) {
+    storage::ThrowIfCancelled(token, "inspect packed index");
     AssertInfo(files.size() == 1 && context.Valid(),
                "Async scalar load requires one V3 file and a valid context");
     storage::MemFileManagerImpl manager(context);
     const bool is_index_file =
         storage_namespace == storage::ArtifactStorageNamespace::Index;
-    std::shared_ptr<InputStream> input;
+    folly::Try<std::shared_ptr<InputStream>> opened;
     if (use_async_load) {
-        input = co_await folly::coro::co_withCancellation(
-            folly::CancellationToken{},
-            manager.OpenInputStreamAsync(files.front(), is_index_file));
+        // Drain opening before observing cancellation, including an open
+        // failure, so no constructor-owned references escape this call.
+        opened =
+            co_await folly::coro::co_awaitTry(folly::coro::co_withCancellation(
+                folly::CancellationToken{},
+                manager.OpenInputStreamAsync(files.front(), is_index_file)));
     } else {
-        input = manager.OpenInputStream(files.front(), is_index_file);
+        opened = folly::makeTryWith([&] {
+            return manager.OpenInputStream(files.front(), is_index_file);
+        });
     }
+    storage::ThrowIfCancelled(token, "inspect packed index");
+    auto input = std::move(opened).value();
     AssertInfo(input != nullptr, "Failed to open packed scalar index");
     co_return co_await storage::AsyncIndexEntryReader::Open(
-        std::move(input),
-        context.fieldDataMeta.collection_id,
-        proto::common::LoadPriority::HIGH,
-        {});
+        std::move(input), context.fieldDataMeta.collection_id, priority, token);
 }
 
 }  // namespace
@@ -79,16 +87,26 @@ InspectPackedScalarIndex(const std::vector<std::string>& files,
 std::unique_ptr<storage::AsyncIndexEntryReader>
 InspectPackedIndexFile(const std::vector<std::string>& files,
                        const storage::FileManagerContext& context,
-                       storage::ArtifactStorageNamespace storage_namespace) {
+                       storage::ArtifactStorageNamespace storage_namespace,
+                       milvus::OpContext* op_ctx) {
+    const auto token =
+        op_ctx ? op_ctx->cancellation_token : folly::CancellationToken{};
+    const auto priority =
+        op_ctx && op_ctx->runtime_load_priority.value_or(0) != 0
+            ? proto::common::LoadPriority::LOW
+            : proto::common::LoadPriority::HIGH;
+    storage::ThrowIfCancelled(token, "inspect packed index");
     const bool use_async = context.use_async_load.value_or(
         segcore::storagev2translator::StorageV2AsyncLoadEnabled());
-    auto task =
-        InspectPackedScalarIndex(files, context, storage_namespace, use_async);
-    return use_async ? folly::coro::blockingWait(folly::coro::co_withExecutor(
-                           storage::ResolveAsyncLoadExecutor(
-                               {}, proto::common::LoadPriority::HIGH),
-                           std::move(task)))
-                     : folly::coro::blockingWait(std::move(task));
+    auto task = InspectPackedScalarIndex(
+        files, context, storage_namespace, use_async, priority, token);
+    auto reader = use_async
+                      ? folly::coro::blockingWait(folly::coro::co_withExecutor(
+                            storage::ResolveAsyncLoadExecutor({}, priority),
+                            std::move(task)))
+                      : folly::coro::blockingWait(std::move(task));
+    storage::ThrowIfCancelled(token, "inspect packed index");
+    return reader;
 }
 
 folly::coro::Task<IIndexReaderBasePtr>
