@@ -130,6 +130,7 @@ set(INDEX_TEST_FILES
         ${CMAKE_HOME_DIRECTORY}/src/index/test_utils/IndexUtilsTest.cpp
         ${CMAKE_HOME_DIRECTORY}/src/index/vector/VectorDiskFamilyTest.cpp
         ${CMAKE_HOME_DIRECTORY}/src/index/vector/VectorFamilyTest.cpp
+        ${CMAKE_HOME_DIRECTORY}/src/index/scalar/text/TextIndexReaderTest.cpp
         )
 set(INDEX_TEST_SUPPORT_FILES
         ${CMAKE_HOME_DIRECTORY}/src/index/test_utils/JsonDataSets.cpp
