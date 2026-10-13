@@ -24,6 +24,9 @@
 
 #include "common/RegexQuery.h"
 #include "index/contracts/query/IPatternMatchReader.h"
+#include "index/fmindex/FMIndex.h"
+#include "index/scalar/fmindex/FmIndexReader.h"
+#include "index/test_utils/AssertHelpers.h"
 #include "index/test_utils/ScalarReaderFactory.h"
 #include "index/test_utils/ScalarTestData.h"
 
@@ -384,6 +387,53 @@ TEST(FmIndexReaderTest, RegexBooleanConditionsUseCurrentCounts) {
         EXPECT_EQ(index->PatternMatch(pattern, PatternOp::RegexMatch).count(),
                   rows.size());
     }
+}
+
+TEST(FmIndexReaderTest, NonNullableHeapAndMmapKeepNullAndPatternResults) {
+    ScalarTestData<std::string_view> data(
+        {"alpha", "beta", "alpine", "", "gamma", "alphabet"});
+    data.validity_present = false;
+    const ScalarTestInput<std::string_view> input(data);
+    for (const auto name :
+         {"FmIndexVarcharNonNull", "FmIndexVarcharNonNullMmap"}) {
+        SCOPED_TRACE(name);
+        const auto& backend =
+            ScalarReaderBackends().Get<std::string_view>(name);
+        auto reader = backend.Create(input.View());
+        ASSERT_NE(reader, nullptr);
+        const auto* nulls = dynamic_cast<const INullReader*>(reader.get());
+        const auto* pattern =
+            dynamic_cast<const IPatternMatchReader*>(reader.get());
+        ASSERT_NE(nulls, nullptr);
+        ASSERT_NE(pattern, nullptr);
+        EXPECT_EQ(nulls->IsNull().count(), 0);
+        EXPECT_EQ(nulls->IsNotNull().count(), data.values.size());
+        const auto hits = pattern->PatternMatch("alp", PatternOp::PrefixMatch);
+        ASSERT_EQ(hits.size(), data.values.size());
+        for (size_t row = 0; row < data.values.size(); ++row) {
+            EXPECT_EQ(hits[row],
+                      std::string_view(data.values[row]).starts_with("alp"))
+                << row;
+        }
+    }
+}
+
+TEST(FmIndexReaderTest, BuilderNonNullableStateStillRejectsNullRows) {
+    auto engine = std::make_shared<fmindex::FMIndex>();
+    const std::vector<std::string_view> docs{"alpha", ""};
+    engine->Build(docs, 32);
+    ASSERT_TRUE(engine->valid());
+    TargetBitmap nulls(docs.size(), false);
+    nulls.set(1);
+    ExpectSegcoreError(ErrorCode::UnexpectedError, [&] {
+        static_cast<void>(FmIndexStorage::Create(nullptr,
+                                                 engine,
+                                                 std::move(nulls),
+                                                 docs.size(),
+                                                 DataType::VARCHAR,
+                                                 false,
+                                                 FmIndexStateOrigin::Builder));
+    });
 }
 
 }  // namespace

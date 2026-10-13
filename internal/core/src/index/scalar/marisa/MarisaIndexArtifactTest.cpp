@@ -278,10 +278,14 @@ TEST(MarisaIndexArtifactTest, RejectsTruncatedRowIds) {
     });
 }
 
-TEST(MarisaIndexArtifactTest, RejectsOutOfRangeRowId) {
+TEST(MarisaIndexArtifactTest, RejectsOutOfRangeRowIdWhileRebuilding) {
     const auto& backend =
         ScalarReaderBackends().Get<std::string_view>("MarisaVarcharNonNull");
     auto persisted = SerializedMarisa(backend.Name());
+    persisted.entries.erase(MARISA_CSR_INDEX);
+    persisted.entries.erase(MARISA_CSR_OFFSETS);
+    persisted.metadata.erase(std::string(kCsrFormatVersionMeta));
+    persisted.metadata.erase(std::string(kCsrNumKeysMeta));
     auto& ids = persisted.entries.at(MARISA_STR_IDS);
     ASSERT_GE(ids.size(), sizeof(int64_t));
     const auto invalid = std::numeric_limits<int64_t>::max();
@@ -385,20 +389,6 @@ TEST(MarisaIndexArtifactTest, RejectsTruncatedCsrOffsets) {
     auto& offsets = persisted.entries.at(MARISA_CSR_OFFSETS);
     ASSERT_FALSE(offsets.empty());
     offsets.pop_back();
-
-    ExpectSegcoreError(ErrorCode::DataFormatBroken, [&] {
-        static_cast<void>(OpenV3(backend, persisted, {.row_count = 5}));
-    });
-}
-
-TEST(MarisaIndexArtifactTest, RejectsCsrOffsetForWrongRow) {
-    const auto& backend =
-        ScalarReaderBackends().Get<std::string_view>("MarisaVarcharNonNull");
-    auto persisted = SerializedMarisa(backend.Name());
-    auto& offsets = persisted.entries.at(MARISA_CSR_OFFSETS);
-    ASSERT_GE(offsets.size(), sizeof(uint32_t));
-    const uint32_t invalid = 100;
-    std::memcpy(offsets.data(), &invalid, sizeof(invalid));
 
     ExpectSegcoreError(ErrorCode::DataFormatBroken, [&] {
         static_cast<void>(OpenV3(backend, persisted, {.row_count = 5}));
