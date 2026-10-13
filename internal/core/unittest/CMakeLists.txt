@@ -133,6 +133,7 @@ set(INDEX_TEST_FILES
         ${CMAKE_HOME_DIRECTORY}/src/index/scalar/text/TextIndexReaderTest.cpp
         ${CMAKE_HOME_DIRECTORY}/src/index/scalar/inverted/InvertedIndexBuilderBatchTest.cpp
         ${CMAKE_HOME_DIRECTORY}/src/index/scalar/ngram/NgramIndexBuilderBatchTest.cpp
+        ${CMAKE_HOME_DIRECTORY}/src/index/scalar/json/JsonFlatIndexBuilderTest.cpp
         )
 set(INDEX_TEST_SUPPORT_FILES
         ${CMAKE_HOME_DIRECTORY}/src/index/test_utils/JsonDataSets.cpp
