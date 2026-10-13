@@ -141,7 +141,8 @@ PhyNullExpr::DetermineExecPath() {
     }
 
     auto req = MakeIndexRequirement(RequiredReader::Null);
-    req.value_type = expr_->column_.element_level_
+    req.value_type = (expr_->column_.element_level_ ||
+                      expr_->column_.data_type_ == DataType::ARRAY)
                          ? expr_->column_.element_type_
                          : expr_->column_.data_type_;
     SelectAndPinIndex(req);
