@@ -135,6 +135,7 @@ set(INDEX_TEST_FILES
         ${CMAKE_HOME_DIRECTORY}/src/index/scalar/ngram/NgramIndexBuilderBatchTest.cpp
         ${CMAKE_HOME_DIRECTORY}/src/index/scalar/json/JsonFlatIndexBuilderTest.cpp
         ${CMAKE_HOME_DIRECTORY}/src/index/scalar/sort/SortedStringPostingTest.cpp
+        ${CMAKE_HOME_DIRECTORY}/src/index/scalar/marisa/MarisaIndexLoadErrorTest.cpp
         )
 set(INDEX_TEST_SUPPORT_FILES
         ${CMAKE_HOME_DIRECTORY}/src/index/test_utils/JsonDataSets.cpp

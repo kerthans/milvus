@@ -296,7 +296,11 @@ TEST(MarisaIndexArtifactTest, RejectsCorruptTriePayload) {
     const auto& backend =
         ScalarReaderBackends().Get<std::string_view>("MarisaVarcharNonNull");
     auto persisted = SerializedMarisa(backend.Name());
-    persisted.entries[MARISA_TRIE_INDEX] = {0x00, 0x01, 0x02};
+    auto& trie = persisted.entries.at(MARISA_TRIE_INDEX);
+    ASSERT_FALSE(trie.empty());
+    // A short file raises MARISA_IO_ERROR; corrupt a complete header to test
+    // the library's distinct MARISA_FORMAT_ERROR classification.
+    trie.front() ^= uint8_t{0xff};
 
     ExpectSegcoreError(ErrorCode::DataFormatBroken, [&] {
         static_cast<void>(OpenV3(backend, persisted, {.row_count = 5}));
